@@ -1,5 +1,5 @@
 #
-# Copyright 2012 Quantopian, Inc.
+# Copyright 2013 Quantopian, Inc.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -151,6 +151,10 @@ class TradingEnvironment(object):
             tzinfo=pytz.utc
         )
 
+    def exchange_dt_in_utc(self, dt):
+        delorean = Delorean(dt, self.exchange_tz)
+        return delorean.shift(pytz.utc.zone).datetime
+
     @property
     def period_trading_days(self):
         if self._period_trading_days is None:
@@ -218,8 +222,7 @@ Last successful date: %s" % self.market_open)
         )
         # create a new Delorean with the next_open naive date and
         # the correct timezone for the exchange.
-        open_delorean = Delorean(next_open, self.exchange_tz)
-        open_utc = open_delorean.shift("UTC").datetime
+        open_utc = self.exchange_dt_in_utc(next_open)
 
         market_open = open_utc
         market_close = market_open + self.get_trading_day_duration(open_utc)
@@ -253,7 +256,8 @@ Last successful date: %s" % self.market_open)
 
 class SimulationParameters(object):
     def __init__(self, period_start, period_end,
-                 capital_base=10e3):
+                 capital_base=10e3,
+                 emission_rate='daily'):
 
         global environment
         if not environment:
@@ -263,6 +267,17 @@ class SimulationParameters(object):
         self.period_start = period_start
         self.period_end = period_end
         self.capital_base = capital_base
+
+        self.emission_rate = emission_rate
+
+        assert self.period_start <= self.period_end, \
+            "Period start falls after period end."
+
+        assert self.period_start <= environment.last_trading_day, \
+            "Period start falls after the last known trading day."
+        assert self.period_end >= environment.first_trading_day, \
+            "Period end falls before the first known trading day."
+
         self.first_open = self.calculate_first_open()
         self.last_close = self.calculate_last_close()
         start_index = \
@@ -273,14 +288,6 @@ class SimulationParameters(object):
         # trading_days.
         self.trading_days = \
             environment.trading_days[start_index:end_index + 1]
-
-        assert self.period_start <= self.period_end, \
-            "Period start falls after period end."
-
-        assert self.period_start <= environment.last_trading_day, \
-            "Period start falls after the last known trading day."
-        assert self.period_end >= environment.first_trading_day, \
-            "Period end falls before the first known trading day."
 
     def calculate_first_open(self):
         """

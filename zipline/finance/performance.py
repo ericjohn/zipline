@@ -33,8 +33,6 @@ Performance Tracking
     +-----------------+----------------------------------------------------+
     | progress        | percentage of test completed                       |
     +-----------------+----------------------------------------------------+
-    | started_at      | datetime in utc marking the start of this test     |
-    +-----------------+----------------------------------------------------+
     | capital_base    | The initial capital assumed for this tracker.      |
     +-----------------+----------------------------------------------------+
     | cumulative_perf | A dictionary representing the cumulative           |
@@ -159,16 +157,11 @@ class PerformanceTracker(object):
         first_day = self.sim_params.first_open
         self.market_open, self.market_close = \
             trading.environment.get_open_and_close(first_day)
-        self.progress = 0.0
         self.total_days = self.sim_params.days_in_period
-        # one indexed so that we reach 100%
-        self.day_count = 0.0
         self.capital_base = self.sim_params.capital_base
-        self.returns = []
-        self.txn_count = 0
-        self.event_count = 0
         self.cumulative_risk_metrics = \
             risk.RiskMetricsIterative(self.period_start)
+        self.emission_rate = sim_params.emission_rate
 
         # this performance period will span the entire simulation.
         self.cumulative_performance = PerformancePeriod(
@@ -194,6 +187,14 @@ class PerformanceTracker(object):
             keep_transactions=True,
             serialize_positions=True
         )
+
+        self.saved_dt = self.period_start
+        self.returns = []
+        # one indexed so that we reach 100%
+        self.day_count = 0.0
+        self.txn_count = 0
+        self.event_count = 0
+        self.progress = 0.0
 
     def __repr__(self):
         return "%s(%r)" % (
@@ -226,15 +227,27 @@ class PerformanceTracker(object):
         Creates a dictionary representing the state of this tracker.
         Returns a dict object of the form described in header comments.
         """
-        return {
+        _dict = {
             'period_start': self.period_start,
             'period_end': self.period_end,
             'progress': self.progress,
             'capital_base': self.capital_base,
             'cumulative_perf': self.cumulative_performance.to_dict(),
-            'daily_perf': self.todays_performance.to_dict(),
-            'cumulative_risk_metrics': self.cumulative_risk_metrics.to_dict()
         }
+        if self.emission_rate == 'daily':
+            _dict.update({'cumulative_risk_metrics':
+                          self.cumulative_risk_metrics.to_dict(),
+                          'daily_perf':
+                          self.todays_performance.to_dict()})
+        if self.emission_rate == 'minute':
+            # Currently reusing 'todays_performance' for intraday trading
+            # result, should be analogous, but has the potential for needing
+            # its own configuration down the line.
+            # Naming as intraday to make clear that these results are
+            # being updated per minute
+            _dict['intraday_perf'] = self.todays_performance.to_dict()
+
+        return _dict
 
     def process_event(self, event):
 
@@ -243,8 +256,17 @@ class PerformanceTracker(object):
 
         if event.type == zp.DATASOURCE_TYPE.TRADE:
             messages = []
-            while event.dt > self.market_close and event.dt < self.last_close:
-                messages.append(self.handle_market_close())
+
+            # This switch could also be handled by an inheritance
+            # with a DailyPerformanceTracker and a MinutePerformanceTracker
+            if self.emission_rate == 'daily':
+                while (event.dt > self.market_close and
+                       event.dt < self.last_close):
+                    messages.append(self.handle_market_close())
+            elif self.emission_rate == 'minute':
+                if event.dt > self.saved_dt:
+                    messages.append(self.to_dict())
+                    self.saved_dt = event.dt
 
             if event.TRANSACTION:
                 self.txn_count += 1
@@ -410,9 +432,6 @@ class Position(object):
             total_shares = self.amount + txn.amount
             self.cost_basis = total_cost / total_shares
             self.amount = self.amount + txn.amount
-
-    def currentValue(self):
-        return self.amount * self.last_sale_price
 
     def __repr__(self):
         template = "sid: {sid}, amount: {amount}, cost_basis: {cost_basis}, \
